@@ -1,31 +1,20 @@
 #pragma once
 
 #include <any>
+#include <concepts>
 #include <functional>
 #include <memory>
+#include <type_traits>
 #include <typeindex>
+#include <unordered_map>
+#include <utility>
 
-#include "container.hpp"
+#include "container_error.hpp"
+#include "registerable.hpp"
+#include "detail/constructor_arity.hpp"
 
 
 namespace injection {
-    class container;
-
-    template <class T>
-    concept registerable = requires(T a, container& c) {
-        T::reg(c);
-    };
-
-    struct container_error : std::runtime_error {
-        explicit container_error(const char* m) : std::runtime_error(m) {}
-        explicit container_error(const std::string& m) : std::runtime_error(m) {}
-    };
-
-    class construction_spec {
-    public:
-        std::function<std::any(container&)> builder;
-    };
-
     class container {
         template <class T>
         using factory = std::function<std::unique_ptr<T>(container&)>;
@@ -33,45 +22,6 @@ namespace injection {
         std::unordered_map<std::type_index, std::any> values;
         std::unordered_map<std::type_index, std::any> singletons;
         std::unordered_map<std::type_index, std::any> transients;
-
-        static constexpr std::size_t max_constructor_arity = 16;
-
-        // Allows compile time resolution of constructor args.
-        template <class O> struct probe_arg {
-            // ReSharper disable once CppFunctionIsNotImplemented
-            // ReSharper disable once CppNonExplicitConversionOperator
-            template <class U> operator std::shared_ptr<U>() const;
-
-            // ReSharper disable once CppFunctionIsNotImplemented
-            // ReSharper disable once CppNonExplicitConversionOperator
-            template <class U> operator std::unique_ptr<U>() const;
-
-            // ReSharper disable once CppFunctionIsNotImplemented
-            // ReSharper disable once CppNonExplicitConversionOperator
-            template <class U> requires (!std::same_as<std::remove_cvref_t<U>, O>)
-            operator U() const;
-        };
-
-        template <class Arg, std::size_t> using repeat = Arg;
-
-        // Determine if a particular class has a constructor with I arguments.
-        template <class T, std::size_t... I>
-        static consteval bool constructible_with(std::index_sequence<I...>) {
-            return std::is_constructible_v<T, repeat<probe_arg<T>, I>...>;
-        }
-
-        // Determine the largest arity of the constructors of type T.
-        template <class T, std::size_t N = max_constructor_arity>
-        static consteval std::size_t constructor_arity() {
-            if constexpr (constructible_with<T>(std::make_index_sequence<N>{})) {
-                return N;
-            } else if constexpr (N > 0) {
-                return constructor_arity<T, N-1>();
-            } else {
-                static_assert(false, "No constructor injectable from smart pointer arguments");
-                return 0;
-            }
-        }
 
         template <class O> struct auto_arg {
             container& c;
@@ -94,16 +44,20 @@ namespace injection {
 
         template <class T, std::size_t... I>
         std::unique_ptr<T> make_auto(std::index_sequence<I...>) {
-            return std::make_unique<T>(repeat<auto_arg<T>, I>{ *this }...);
+            return std::make_unique<T>(detail::repeat<auto_arg<T>, I>{ *this }...);
         }
 
+        [[noreturn]] static void throw_not_unique(std::type_index tid);
+        [[noreturn]] static void throw_unknown_type(std::type_index tid);
+        [[noreturn]] static void throw_no_value(std::type_index tid);
+
     public:
-        virtual ~container() = default;
+        virtual ~container();
 
         template <class ServiceType, class ImplementationType, class... Args>
         void register_singleton(Args&&... args) {
             std::shared_ptr<ServiceType> impl_ptr = std::make_shared<ImplementationType>(std::forward<Args>(args)...);
-            singletons.insert_or_assign(typeid(ServiceType), impl_ptr);
+            singletons.insert_or_assign(typeid(ServiceType), std::move(impl_ptr));
         }
 
         template <class ServiceType, class ImplementationType = ServiceType>
@@ -113,11 +67,9 @@ namespace injection {
                 "std::unique_ptr<ServiceType> needs a virtual destructor to delete a derived type"
             );
 
-            const std::type_index service_tid = typeid(ServiceType);
+            constexpr std::size_t arity = detail::constructor_arity<ImplementationType>();
 
-            constexpr std::size_t arity = constructor_arity<ImplementationType>();
-
-            transients.insert_or_assign(service_tid, factory<ServiceType> {
+            transients.insert_or_assign(typeid(ServiceType), factory<ServiceType> {
                 [](container& c) -> std::unique_ptr<ServiceType> {
                     return c.make_auto<ImplementationType>(std::make_index_sequence<arity>{});
                 }
@@ -126,7 +78,7 @@ namespace injection {
 
         template <class Type>
         void register_value(Type val) {
-            values.insert_or_assign(typeid(Type), val);
+            values.insert_or_assign(typeid(Type), std::move(val));
         }
 
         template <registerable R>
@@ -143,20 +95,15 @@ namespace injection {
             }
 
             if (singletons.contains(tid)) {
-                throw container_error {
-                    std::format("'{}' is a singleton and cannot be uniquely owned", tid.name())
-                };
+                throw_not_unique(tid);
             }
 
-            throw container_error {
-                std::format("unknown type index: '{}'", tid.name())
-            };
+            throw_unknown_type(tid);
         }
 
         template <class T>
         std::shared_ptr<T> resolve() {
-            const std::type_index tid = typeid(T);
-            if (const auto iter = singletons.find(tid); iter != singletons.cend()) {
+            if (const auto iter = singletons.find(typeid(T)); iter != singletons.cend()) {
                 return std::any_cast<std::shared_ptr<T>>(iter->second);
             }
 
@@ -165,12 +112,12 @@ namespace injection {
 
         template <class Type>
         Type resolve_value() {
-            if (values.contains(typeid(Type))) {
-                decltype(auto) val = values.at(typeid(Type));
+            if (const std::type_index tid = typeid(Type); values.contains(tid)) {
+                decltype(auto) val = values.at(tid);
                 return std::any_cast<Type>(val);
             }
 
-            throw container_error { std::format("no value of type {} registered", typeid(Type).name()) };
+            throw_no_value(typeid(Type));
         }
     };
 }
