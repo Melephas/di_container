@@ -8,7 +8,7 @@ include(FetchContent)
 FetchContent_Declare(
         Logging
         GIT_REPOSITORY https://github.com/Melephas/Logging-Cpp.git
-        GIT_TAG        e8e328282265f88e7f7303d1f30835f445a8652f
+        GIT_TAG        257deaccef218feb8ffeb8d2af4a7cbc5376ecc9
 )
 
 FetchContent_MakeAvailable(Logging)
@@ -26,16 +26,16 @@ target_compile_options(injection PRIVATE
         -Wall -Wextra -Wpedantic -Werror
 )
 
-add_executable(
-    di_container
-        main.cpp
-)
-
-target_compile_options(di_container PRIVATE
-        -Wall -Wextra -Wpedantic -Werror
-)
-
-target_link_libraries(di_container PRIVATE injection Logging)
+#add_executable(
+#    di_container
+#        main.cpp
+#)
+#
+#target_compile_options(di_container PRIVATE
+#        -Wall -Wextra -Wpedantic -Werror
+#)
+#
+#target_link_libraries(di_container PRIVATE injection Logging)
 
 option(DI_CONTAINER_BUILD_TESTS "Build unit tests" ON)
 if (DI_CONTAINER_BUILD_TESTS)
